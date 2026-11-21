@@ -284,6 +284,10 @@ jobs:
                    grep -E "Prop:" "$art/avb-info.txt" || true; exit 1; }
           done
           echo "AVB props OK"
+
+          # prove the signature itself verifies with the key we signed with
+          $AVB extract_public_key --key "$key" --output "$art/public.avbpubkey" >/dev/null
+          $AVB verify_image --image "$art/boot.img" --key "$art/public.avbpubkey"
           ( cd "$art" && sha256sum boot.img | tee -a SHA256SUMS )
 
       - name: Contract gate (4,267 symbols of PLK110 17.0.1.201)

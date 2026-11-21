@@ -273,10 +273,11 @@ jobs:
             "com.android.build.boot.fingerprint:$AVB_FINGERPRINT" \
             "com.android.build.boot.security_patch:$AVB_SECURITY_PATCH"; do
             key=${kv%%:*}; val=${kv#*:}
-            expected="Prop: $key -> $val"
-            # info_image indents its output, so match the substring, not the line
-            grep -Fq "$expected" "$art/avb-info.txt" \
-              || { echo "::error::AVB prop mismatch, expected: $expected"; \
+            line=$(grep -F "Prop: $key" "$art/avb-info.txt" | head -1 || true)
+            # match the value inside the line so quoting/arrow style does not matter
+            [ -n "$line" ] && printf '%s' "$line" | grep -Fq "$val" \
+              || { echo "::error::AVB prop mismatch for $key"; \
+                   echo "  want value: $val"; echo "  got line  : ${line:-<none>}"; \
                    grep -E "Prop:" "$art/avb-info.txt" || true; exit 1; }
           done
           echo "AVB props OK"

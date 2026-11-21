@@ -162,6 +162,12 @@ jobs:
           done
           echo "tree OK: $(git rev-parse --short HEAD)"
 
+      - name: Set up Python 3.13 (prebuilt avbtool bytecode)
+        if: ${{ inputs.target == 'kernel+boot' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Show effective kleaf output list
         run: |
           set -euo pipefail
@@ -214,6 +220,14 @@ jobs:
           art="$GITHUB_WORKSPACE/artifacts"
           avbtool=$(find prebuilts/kernel-build-tools -name avbtool -type f | head -1)
           test -n "${avbtool:-}" || { echo "::error::avbtool not in prebuilts"; exit 1; }
+          # the prebuilt is precompiled bytecode; pick an interpreter whose
+          # magic matches instead of blindly calling `python3 <file>`
+          AVB=""
+          for cand in "python3.13 $avbtool" "$avbtool" "python3.12 $avbtool" "python3 $avbtool"; do
+            if $cand version >/dev/null 2>&1; then AVB="$cand"; break; fi
+          done
+          test -n "$AVB" || { echo "::error::cannot execute avbtool ($avbtool)"; file "$avbtool"; exit 1; }
+          echo "avbtool: $AVB -> $($AVB version)"
           key=tools/mkbootimg/gki/testdata/testkey_rsa4096.pem
           test -f "$key" || { echo "::error::test AVB key missing"; exit 1; }
 
@@ -224,7 +238,7 @@ jobs:
             --kernel "$art/Image" \
             --output "$art/boot-unsigned.img"
 
-          python3 "$avbtool" add_hash_footer \
+          $AVB add_hash_footer \
             --image "$art/boot-unsigned.img" \
             --partition_size "$BOOT_PARTITION_SIZE" --partition_name boot \
             --algorithm SHA256_RSA4096 --key "$key" \

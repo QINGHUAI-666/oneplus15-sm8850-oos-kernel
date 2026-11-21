@@ -250,34 +250,36 @@ jobs:
             --prop "com.android.build.boot.security_patch:$AVB_SECURITY_PATCH"
           rm -f "$art/boot-unsigned.img"
 
-          python3 - "$art/boot.img" "$AVB_FINGERPRINT" "$AVB_SECURITY_PATCH" "$BOOT_PARTITION_SIZE" <<'PYEOF'
+          # structural checks on the container itself
+          python3 - "$art/boot.img" "$BOOT_PARTITION_SIZE" <<'PYEOF'
           import struct, sys
-          path, fp, patch, size = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+          path, size = sys.argv[1], int(sys.argv[2])
           d = open(path, 'rb').read()
           assert len(d) == size, f"boot.img {len(d)} != {size}"
           assert d[:8] == b'ANDROID!', 'bad boot magic'
-          hv = struct.unpack_from('<I', d, 40)[0]
-          assert hv == 4, f'header version {hv}'
-          # parity with the stock container (measured: only kernel_size differs)
+          assert struct.unpack_from('<I', d, 40)[0] == 4, 'header version != 4'
           assert struct.unpack_from('<I', d, 20)[0] == 1584, 'header_size != 1584'
           assert struct.unpack_from('<I', d, 16)[0] == 0, 'os_version field != 0'
-          ksz = struct.unpack_from('<I', d, 8)[0]
           assert struct.unpack_from('<I', d, 12)[0] == 0, 'ramdisk must be empty'
           assert d[44:44+512].split(b'\0')[0] == b'', 'cmdline must be empty'
-          foot = d[-64:]
-          assert foot[:4] == b'AVBf', 'missing avb footer'
-          voff, vsz = struct.unpack('>QQ', foot[20:36])
-          vb = d[voff:voff+vsz]
-          for key, want in (('com.android.build.boot.fingerprint', fp),
-                            ('com.android.build.boot.security_patch', patch),
-                            ('com.android.build.boot.os_version', '16')):
-              k = vb.find(key.encode()); assert k > 0, f'{key} missing'
-              p = k + len(key.encode()); ln = struct.unpack('>Q', vb[p:p+8])[0]
-              got = vb[p+8:p+8+ln].decode()
-              assert got == want, f'{key}: {got!r} != {want!r}'
-              print(f'  {key} = {got}')
-          print(f'boot.img OK: {len(d)} bytes, header v4, kernel {ksz}')
+          assert d[-64:][:4] == b'AVBf', 'missing avb footer'
+          print(f'container OK: {len(d)} bytes, header v4, kernel {struct.unpack_from("<I", d, 8)[0]}')
           PYEOF
+
+          # AVB properties come from avbtool itself (no hand-rolled vbmeta parsing)
+          $AVB info_image --image "$art/boot.img" | tee "$art/avb-info.txt" | grep -E "^Prop:"
+          for kv in \
+            "com.android.build.boot.os_version:16" \
+            "com.android.build.boot.fingerprint:$AVB_FINGERPRINT" \
+            "com.android.build.boot.security_patch:$AVB_SECURITY_PATCH"; do
+            key=${kv%%:*}; val=${kv#*:}
+            expected="Prop: $key -> $val"
+            # info_image indents its output, so match the substring, not the line
+            grep -Fq "$expected" "$art/avb-info.txt" \
+              || { echo "::error::AVB prop mismatch, expected: $expected"; \
+                   grep -E "Prop:" "$art/avb-info.txt" || true; exit 1; }
+          done
+          echo "AVB props OK"
           ( cd "$art" && sha256sum boot.img | tee -a SHA256SUMS )
 
       - name: Contract gate (4,267 symbols of PLK110 17.0.1.201)

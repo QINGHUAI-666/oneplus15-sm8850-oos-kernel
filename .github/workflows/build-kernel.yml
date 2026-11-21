@@ -34,12 +34,10 @@ on:
       jobs:
         description: "bazel --jobs"
         default: "4"
-  push:
-    branches:
-      - "plk110-*"
-    paths:
-      - "kernel_platform/**"
-      - "tools/plk110/**"
+  # Deliberately dispatch-only: a push trigger would queue a job that no
+  # runner can pick up (self-hosted runners are not provided by GitHub).
+  # Start a build with:
+  #   gh workflow run build-kernel.yml -f variant=plk110-17.0.1.201-kernelsu-susfs
 
 permissions:
   contents: read

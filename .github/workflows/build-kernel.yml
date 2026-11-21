@@ -183,15 +183,6 @@ jobs:
             //common:kernel_aarch64_abi_dump \
             //common:kernel_aarch64_abi_kmi_symbol_checks
 
-      - name: Build AVB-signed boot image
-        if: ${{ inputs.target == 'kernel+boot' }}
-        run: |
-          set -euo pipefail
-          cd "$SRC/kernel_platform"
-          tools/bazel --output_user_root="$WORK/out/bazel" build \
-            --jobs="$JOBS" --config=local --kbuild_symtypes \
-            //soc-repo:canoe_perf_avb_sign_boot_image
-
       - name: Collect artifacts
         run: |
           set -euo pipefail
@@ -210,6 +201,65 @@ jobs:
             test "$sz" -eq 100663296 || { echo "::error::boot.img must be 100663296 bytes"; exit 1; }
           fi
           ( cd "$GITHUB_WORKSPACE/artifacts" && sha256sum * | tee SHA256SUMS )
+
+      - name: Package AVB boot image (stock container contract)
+        if: ${{ inputs.target == 'kernel+boot' }}
+        env:
+          AVB_FINGERPRINT: qti/canoe/canoe:16/BP2A.250605.015/1793215886442:user/release-keys
+          AVB_SECURITY_PATCH: "2026-11-01"
+          BOOT_PARTITION_SIZE: "100663296"
+        run: |
+          set -euo pipefail
+          cd "$SRC/kernel_platform"
+          art="$GITHUB_WORKSPACE/artifacts"
+          avbtool=$(find prebuilts/kernel-build-tools -name avbtool -type f | head -1)
+          test -n "${avbtool:-}" || { echo "::error::avbtool not in prebuilts"; exit 1; }
+          key=tools/mkbootimg/gki/testdata/testkey_rsa4096.pem
+          test -f "$key" || { echo "::error::test AVB key missing"; exit 1; }
+
+          # stock container: header v4, 4096 page, empty cmdline, no ramdisk,
+          # os_version/os_patch_level fields zero (stock boot.img has 0 there)
+          python3 tools/mkbootimg/mkbootimg.py \
+            --header_version 4 --pagesize 4096 \
+            --kernel "$art/Image" \
+            --output "$art/boot-unsigned.img"
+
+          python3 "$avbtool" add_hash_footer \
+            --image "$art/boot-unsigned.img" \
+            --partition_size "$BOOT_PARTITION_SIZE" --partition_name boot \
+            --algorithm SHA256_RSA4096 --key "$key" \
+            --prop com.android.build.boot.os_version:16 \
+            --prop "com.android.build.boot.fingerprint:$AVB_FINGERPRINT" \
+            --prop "com.android.build.boot.security_patch:$AVB_SECURITY_PATCH" \
+            --output "$art/boot.img"
+          rm -f "$art/boot-unsigned.img"
+
+          python3 - "$art/boot.img" "$AVB_FINGERPRINT" "$AVB_SECURITY_PATCH" "$BOOT_PARTITION_SIZE" <<'PYEOF'
+          import struct, sys
+          path, fp, patch, size = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+          d = open(path, 'rb').read()
+          assert len(d) == size, f"boot.img {len(d)} != {size}"
+          assert d[:8] == b'ANDROID!', 'bad boot magic'
+          hv = struct.unpack_from('<I', d, 40)[0]
+          assert hv == 4, f'header version {hv}'
+          ksz = struct.unpack_from('<I', d, 8)[0]
+          assert struct.unpack_from('<I', d, 12)[0] == 0, 'ramdisk must be empty'
+          assert d[44:44+512].split(b'\0')[0] == b'', 'cmdline must be empty'
+          foot = d[-64:]
+          assert foot[:4] == b'AVBf', 'missing avb footer'
+          voff, vsz = struct.unpack('>QQ', foot[20:36])
+          vb = d[voff:voff+vsz]
+          for key, want in (('com.android.build.boot.fingerprint', fp),
+                            ('com.android.build.boot.security_patch', patch),
+                            ('com.android.build.boot.os_version', '16')):
+              k = vb.find(key.encode()); assert k > 0, f'{key} missing'
+              p = k + len(key.encode()); ln = struct.unpack('>Q', vb[p:p+8])[0]
+              got = vb[p+8:p+8+ln].decode()
+              assert got == want, f'{key}: {got!r} != {want!r}'
+              print(f'  {key} = {got}')
+          print(f'boot.img OK: {len(d)} bytes, header v4, kernel {ksz}')
+          PYEOF
+          ( cd "$art" && sha256sum boot.img | tee -a SHA256SUMS )
 
       - name: Contract gate (4,267 symbols of PLK110 17.0.1.201)
         run: |

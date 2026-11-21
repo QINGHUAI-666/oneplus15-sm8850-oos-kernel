@@ -1,20 +1,23 @@
 name: build-kernel
 
-# Builds the boot image for one variant branch.
+# Build the kernel from *this repository's* branch.
 #
-# Runner options
-#   self-hosted (default) : [self-hosted, linux, x64, op15] -- fast, repeatable,
-#                            keeps the prebuilts and the bazel cache between runs.
-#   ubuntu-latest         : 4 vCPU / 16 GB RAM. The documented "14 GB SSD" is the
-#                            guaranteed quota, not the volume: a measured run on
-#                            2026-11-21 reported /dev/root 145G with 85G free
-#                            (42% used) before the cleanup step, which then frees
-#                            another ~30-40 GB (Android SDK, .NET, GHC, CodeQL,
-#                            Boost, docker images). ~100+ GB usable is plenty;
-#                            expect 40-70 min on 4 cores.
+# Why not a plain `repo sync`: the manifest's root project is
+# OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8850 and
+# kernel_platform/common is pinned to AOSP kernel/common @ android16-6.12.89_r00.
+# A full `repo sync` therefore materialises a *pristine* ACK tree and ignores the
+# patches this fork carries (KernelSU, SUSFS, the PLK110 defconfig/cert and the
+# kleaf fixes). Measured 2026-11-21: the synced constants.bzl still had
+# vmlinux_oki and the tree had no drivers/kernelsu.
 #
-# Required tools: git, python3 >= 3.10, curl, bash. `repo` is installed by a
-# step when it is missing.
+# So: clone the branch under test, then use `repo` only to fetch the eight
+# kernel_platform/prebuilts/* projects that the manifest pins, and build in place.
+#
+# Runners
+#   self-hosted (label op15) : fast, keeps prebuilts + bazel cache between runs
+#   ubuntu-latest            : 4 vCPU / 16 GB. Measured /dev/root 145G with 85G
+#                              free before cleanup; the cleanup step frees ~30-40G
+#                              more. ~100 GB usable is plenty; expect 40-70 min.
 
 on:
   workflow_dispatch:
@@ -28,9 +31,9 @@ on:
           - plk110-17.0.1.201-droidspaces
           - plk110-17.0.1.201-kernelsu-susfs
       target:
-        description: "bazel target set"
+        description: "what to build"
         type: choice
-        default: kernel+boot
+        default: kernel
         options:
           - kernel
           - kernel+boot
@@ -44,29 +47,37 @@ on:
         options:
           - self-hosted
           - ubuntu-latest
-  # Deliberately dispatch-only: a push trigger would queue a job that no
-  # runner can pick up (self-hosted runners are not provided by GitHub).
-  # Start a build with:
-  #   gh workflow run build-kernel.yml -f variant=plk110-17.0.1.201-kernelsu-susfs
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}-${{ inputs.variant }}
   cancel-in-progress: true
+
+env:
+  PREBUILTS: >-
+    kernel_platform/prebuilts/clang/host/linux-x86
+    kernel_platform/prebuilts/clang-tools
+    kernel_platform/prebuilts/build-tools
+    kernel_platform/prebuilts/kernel-build-tools
+    kernel_platform/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8
+    kernel_platform/prebuilts/jdk/jdk11
+    kernel_platform/prebuilts/ndk-r26
+    kernel_platform/prebuilts/rust
 
 jobs:
   build:
     runs-on: ${{ inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'op15' }}
-    timeout-minutes: 240
+    timeout-minutes: 300
     env:
-      VARIANT: ${{ inputs.variant || github.ref_name }}
-      TARGET: ${{ inputs.target || 'kernel+boot' }}
-      JOBS: ${{ inputs.jobs || '4' }}
+      VARIANT: ${{ inputs.variant }}
+      TARGET: ${{ inputs.target }}
+      JOBS: ${{ inputs.jobs }}
       WORK: ${{ github.workspace }}/work
+      SRC: ${{ github.workspace }}/work/src
     steps:
-      - name: Check out tooling (this repo, shallow)
+      - name: Check out tooling (contract oracle)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -93,71 +104,76 @@ jobs:
             mkdir -p "$HOME/bin"
             curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
             chmod +x "$HOME/bin/repo"
-            # $GITHUB_PATH only affects later steps, so use it directly here too
             echo "$HOME/bin" >> "$GITHUB_PATH"
             export PATH="$HOME/bin:$PATH"
           fi
-          repo --version
+          repo --version | head -1
 
       - name: Preflight
         run: |
           set -euo pipefail
-          echo "variant=$VARIANT target=$TARGET jobs=$JOBS"
+          echo "variant=$VARIANT target=$TARGET jobs=$JOBS runner=${{ inputs.runner }}"
           free -h || true
           df -h "$RUNNER_WORKSPACE" || true
           avail=$(df -BG --output=avail "$RUNNER_WORKSPACE" | tail -1 | tr -dc '0-9')
-          if [ "${{ inputs.runner || 'self-hosted' }}" = "ubuntu-latest" ]; then
-            # trimmed hosted build: source ~14 GB + bazel out ~20 GB
-            need=45
-          else
-            need=80
-          fi
+          need=45; [ "${{ inputs.runner }}" = "self-hosted" ] && need=80
           if [ "${avail:-0}" -lt "$need" ]; then
-            echo "::error::need >= ${need} GB free, have ${avail} GB"
-            exit 1
+            echo "::error::need >= ${need} GB free, have ${avail} GB"; exit 1
           fi
-          command -v repo >/dev/null || { echo "::error::repo (git-repo) is not installed"; exit 1; }
-          python3 -c 'import sys; assert sys.version_info >= (3, 10)' \
-            || { echo "::error::python >= 3.10 required"; exit 1; }
+          command -v repo >/dev/null || { echo "::error::repo missing"; exit 1; }
 
-      - name: repo init/sync (cached)
+      - name: Clone the branch under test
         run: |
           set -euo pipefail
           mkdir -p "$WORK"
           cd "$WORK"
+          if [ ! -d src/.git ]; then
+            git clone --depth 1 --branch "$VARIANT" \
+              "${{ github.server_url }}/${{ github.repository }}.git" src
+          fi
+          cd src
+          echo "HEAD $(git rev-parse --short HEAD) on $(git rev-parse --abbrev-ref HEAD)"
+
+      - name: Fetch the pinned prebuilts only
+        run: |
+          set -euo pipefail
+          cd "$SRC"
           if [ ! -d .repo ]; then
             repo init -u "${{ github.server_url }}/${{ github.repository }}" \
                       -b "$VARIANT" -m oneplus_15.xml --depth=1
           fi
-          repo sync -c -j8 --no-clone-bundle --force-sync
+          # shellcheck disable=SC2086
+          repo sync -c --no-clone-bundle -j8 $PREBUILTS
 
-      - name: Verify tree is complete
+      - name: Verify tree is the one under test
         run: |
           set -euo pipefail
-          cd "$WORK"
-          missing=$(git -C kernel_platform/common rev-parse HEAD >/dev/null 2>&1 && echo no || echo yes)
-          test "$missing" = no || { echo "::error::kernel_platform/common missing"; exit 1; }
-          for p in prebuilts/clang/host/linux-x86 prebuilts/build-tools prebuilts/kernel-build-tools; do
-            test -e "kernel_platform/$p" || { echo "::error::kernel_platform/$p missing (repo sync incomplete)"; exit 1; }
+          cd "$SRC"
+          # our patches must be present, otherwise the manifest tree was used
+          test -d kernel_platform/common/drivers/kernelsu \
+            || { echo "::error::drivers/kernelsu missing - this is not the fork tree"; exit 1; }
+          grep -q "KSU_VERSION" kernel_platform/common/drivers/kernelsu/Kbuild \
+            || { echo "::error::KernelSU pin missing"; exit 1; }
+          grep -q "plk110_17_0_1_201_stock_gki_module_signing" \
+            kernel_platform/common/arch/arm64/configs/gki_defconfig \
+            || { echo "::error::PLK110 trust anchor missing"; exit 1; }
+          for p in $PREBUILTS; do
+            test -d "$p" || { echo "::error::missing prebuilt $p"; exit 1; }
           done
-          echo "tree OK: $(git -C kernel_platform/common rev-parse --short HEAD)"
+          echo "tree OK: $(git rev-parse --short HEAD)"
 
       - name: Show effective kleaf output list
         run: |
           set -euo pipefail
-          cd "$WORK"
-          echo "synced root commit: $(git rev-parse HEAD)"
-          echo "repo manifest branch: $(git -C .repo/manifests rev-parse --abbrev-ref HEAD 2>/dev/null || echo -)"
-          echo "--- vmlinux_oki references in the synced tree ---"
-          grep -rn 'vmlinux_oki' kernel_platform/build/kernel/kleaf/constants.bzl \
-                kernel_platform/common/BUILD.bazel || echo "none (ok)"
-          echo "--- _common_outs as seen by bazel ---"
+          cd "$SRC"
+          grep -rn "vmlinux_oki" kernel_platform/build/kernel/kleaf/constants.bzl \
+                kernel_platform/common/BUILD.bazel || echo "vmlinux_oki: none (ok)"
           sed -n '/_common_outs = \[/,/\]/p' kernel_platform/build/kernel/kleaf/constants.bzl
 
       - name: Build kernel
         run: |
           set -euo pipefail
-          cd "$WORK/kernel_platform"
+          cd "$SRC/kernel_platform"
           tools/bazel --output_user_root="$WORK/out/bazel" build \
             --jobs="$JOBS" --config=local \
             --cache_dir="$WORK/out/kbuild-cache" \
@@ -167,20 +183,19 @@ jobs:
             //common:kernel_aarch64_abi_kmi_symbol_checks
 
       - name: Build AVB-signed boot image
-        if: ${{ (inputs.target || 'kernel+boot') == 'kernel+boot' }}
+        if: ${{ inputs.target == 'kernel+boot' }}
         run: |
           set -euo pipefail
-          cd "$WORK/kernel_platform"
+          cd "$SRC/kernel_platform"
           tools/bazel --output_user_root="$WORK/out/bazel" build \
             --jobs="$JOBS" --config=local --kbuild_symtypes \
             //soc-repo:canoe_perf_avb_sign_boot_image
 
       - name: Collect artifacts
-        id: collect
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cd "$WORK/kernel_platform"
+          cd "$SRC/kernel_platform"
           image=$(find -L bazel-bin/common -name Image -type f | head -1)
           symvers=$(find -L bazel-bin/common -name Module.symvers -type f | head -1)
           test -n "$image" || { echo "::error::Image not produced"; exit 1; }
@@ -191,7 +206,7 @@ jobs:
             cp "$boot" "$GITHUB_WORKSPACE/artifacts/boot.img"
             sz=$(stat -c%s "$GITHUB_WORKSPACE/artifacts/boot.img")
             echo "boot.img bytes: $sz"
-            test "$sz" -eq 100663296 || { echo "::error::boot.img must be 100663296 bytes, got $sz"; exit 1; }
+            test "$sz" -eq 100663296 || { echo "::error::boot.img must be 100663296 bytes"; exit 1; }
           fi
           ( cd "$GITHUB_WORKSPACE/artifacts" && sha256sum * | tee SHA256SUMS )
 
@@ -206,7 +221,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ env.VARIANT }}-${{ github.run_number }}
+          name: kernel-${{ inputs.variant }}-${{ github.run_number }}
           path: |
             artifacts/Image
             artifacts/Module.symvers

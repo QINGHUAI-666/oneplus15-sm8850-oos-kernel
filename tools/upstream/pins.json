@@ -26,5 +26,10 @@
     "kernel_root": "kernel_platform/common",
     "ksu_root": "kernel_platform/common/drivers/kernelsu",
     "version_file": "kernel_platform/common/include/linux/susfs.h"
+  },
+  "policy": {
+    "auto_sync": false,
+    "reason": "Hold: upstream SUSFS kernel patch conflicts in 5 files (mm/memory.c, fs/readdir.c, fs/namei.c, security/selinux/hooks.c, selinux/ss/services.c). KernelSU must move together with SUSFS, so neither is updated until the pair settles.",
+    "review_when": "SUSFS gki-android16-6.12 head patch applies cleanly to its own prior state, or upstream publishes a tagged release"
   }
 }

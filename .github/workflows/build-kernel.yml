@@ -6,11 +6,12 @@ name: build-kernel
 #   self-hosted (default) : [self-hosted, linux, x64, op15] -- fast, repeatable,
 #                            keeps the prebuilts and the bazel cache between runs.
 #   ubuntu-latest         : 4 vCPU / 16 GB RAM. The documented "14 GB SSD" is the
-#                            guaranteed figure; the volume itself is ~84 GB with
-#                            ~29 GB free on arrival, and the cleanup step below
-#                            reclaims another ~30-36 GB (Android SDK, .NET, GHC,
-#                            CodeQL, Boost, docker images). ~55-70 GB usable is
-#                            enough for a trimmed build, but expect 40-70 min.
+#                            guaranteed quota, not the volume: a measured run on
+#                            2026-11-21 reported /dev/root 145G with 85G free
+#                            (42% used) before the cleanup step, which then frees
+#                            another ~30-40 GB (Android SDK, .NET, GHC, CodeQL,
+#                            Boost, docker images). ~100+ GB usable is plenty;
+#                            expect 40-70 min on 4 cores.
 #
 # Required tools: git, python3 >= 3.10, curl, bash. `repo` is installed by a
 # step when it is missing.
@@ -92,7 +93,9 @@ jobs:
             mkdir -p "$HOME/bin"
             curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
             chmod +x "$HOME/bin/repo"
+            # $GITHUB_PATH only affects later steps, so use it directly here too
             echo "$HOME/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/bin:$PATH"
           fi
           repo --version
 

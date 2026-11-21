@@ -178,6 +178,7 @@ jobs:
             --jobs="$JOBS" --config=local \
             --cache_dir="$WORK/out/kbuild-cache" \
             --kbuild_symtypes --show_progress_rate_limit=15 --verbose_failures \
+            --//build/kernel/kleaf:user_ddk_unsafe_headers=//build/kernel/kleaf/impl:empty_filegroup \
             //common:kernel_aarch64 \
             //common:kernel_aarch64_abi_dump \
             //common:kernel_aarch64_abi_kmi_symbol_checks

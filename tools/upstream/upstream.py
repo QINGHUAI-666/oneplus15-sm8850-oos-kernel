@@ -75,14 +75,14 @@ def susfs_head(branch: str) -> tuple[str, str]:
     return c["id"], c["committed_date"]
 
 
-def fetch_susfs_ksu_patch(p: dict):
-    """Download the SUSFS -> KernelSU patch at the pinned SUSFS ref."""
+def fetch_susfs_ksu_patch(p: dict, ref: str | None = None, name: str = "susfs_ksu.patch"):
+    """Download the SUSFS -> KernelSU patch at a given SUSFS ref (default: pin)."""
     s = p["susfs"]
     cache = ROOT / "tools" / "upstream" / "cache"
     cache.mkdir(parents=True, exist_ok=True)
-    out = cache / "susfs_ksu.patch"
+    out = cache / name
     url = (f"{GITLAB_API}/simonpunk%2Fsusfs4ksu/repository/files/"
-           f"{urllib.parse.quote(s['ksu_patch'], safe='')}/raw?ref={s['ref']}")
+           f"{urllib.parse.quote(s['ksu_patch'], safe='')}/raw?ref={ref or s['ref']}")
     try:
         out.write_bytes(http_bytes(url))
     except Exception as exc:  # noqa: BLE001 - network failures must be visible
@@ -135,6 +135,10 @@ def export_kernel(tmp: Path, ref: str, dest: Path) -> None:
         tar.extractall(dest, filter=_safe)
 
 
+def pathname(p: Path) -> str:
+    return p.name
+
+
 def read_tree(root: Path) -> dict[str, bytes]:
     out = {}
     if not root.exists():
@@ -145,12 +149,31 @@ def read_tree(root: Path) -> dict[str, bytes]:
     return out
 
 
-def merge_three_way(base: Path, ours: Path, theirs: Path) -> list[str]:
+def patch_paths(patch_file: Path, strip: str) -> set[str]:
+    """Paths the patch touches, relative to the tree the patch is applied in."""
+    out = set()
+    for line in patch_file.read_text(errors="replace").splitlines():
+        if line.startswith("--- ") or line.startswith("+++ "):
+            path = line[4:].split("\t")[0].strip()
+            parts = path.split("/")
+            if len(parts) > int(strip):
+                out.add("/".join(parts[int(strip):]))
+    return out
+
+
+def merge_three_way(base: Path, ours: Path, theirs: Path,
+                    force_theirs: set[str] | None = None) -> list[str]:
+    force_theirs = force_theirs or set()
     """Apply (theirs - base) onto ours, file by file. Returns conflicted paths."""
     b, o, t = read_tree(base), read_tree(ours), read_tree(theirs)
     conflicts = []
     for rel in sorted(set(b) | set(o) | set(t)):
         bv, ov, tv = b.get(rel), o.get(rel), t.get(rel)
+        if rel in force_theirs and tv is not None:
+            target = ours / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(tv)
+            continue
         if tv == bv:                      # upstream untouched -> keep local
             continue
         target = ours / rel
@@ -210,7 +233,30 @@ def cmd_sync_kernelsu(args) -> int:
     export_kernel(src, old_sha, base_src)
     export_kernel(src, new_sha, new_src)
 
-    conflicts = merge_three_way(base_src, target, new_src)
+    # Both sides must be "SUSFS-shaped" before merging, otherwise the SUSFS
+    # hooks in our tree look like local edits and collide with every upstream
+    # touch of the same lines.
+    old_patch = fetch_susfs_ksu_patch(p, name="susfs_ksu_pinned.patch")
+    new_patch = fetch_susfs_ksu_patch(p, ref=(args.susfs_ref or p["susfs"]["branch"]),
+                                      name="susfs_ksu_target.patch")
+    if old_patch is None or new_patch is None:
+        print("[ksu] cannot fetch the SUSFS KernelSU patch; refusing", file=sys.stderr)
+        return 3
+    for label, d, patch_file in (("base", base_src, old_patch),
+                                 ("new", new_src, new_patch)):
+        strip = "2" if b"+++ b/kernel/" in patch_file.read_bytes() else "1"
+        rc = run(["patch", f"-p{strip}", "--forward", "--batch",
+                  "--no-backup-if-mismatch", "-i", str(patch_file)], cwd=d, check=False)
+        if rc.returncode != 0:
+            print(f"[ksu] warning: SUSFS patch did not apply cleanly to {label} tree "
+                  f"({pathname(patch_file)})", file=sys.stderr)
+        for rej in d.rglob("*.rej"):
+            rej.unlink()
+
+    # files owned by the SUSFS patch have no local content worth merging
+    strip_new = "2" if b"+++ b/kernel/" in new_patch.read_bytes() else "1"
+    owned = patch_paths(new_patch, strip_new)
+    conflicts = merge_three_way(base_src, target, new_src, force_theirs=owned)
     if conflicts:
         report = ROOT / "tools" / "upstream" / "report.md"
         report.write_text("# KernelSU vendor merge: conflicts\n\n" +
@@ -345,6 +391,51 @@ def write_conflict_report(rejects: list[Path], root: Path, what: str) -> None:
         print(f"  CONFLICT {rej.relative_to(root)}", file=sys.stderr)
 
 
+def cmd_compat(args) -> int:
+    """Can the SUSFS KernelSU patch be applied to a given KernelSU revision?
+
+    SUSFS ships 10_enable_susfs_for_ksu.patch written against one particular
+    KernelSU tree; the two upstreams must be updated as a pair. This command
+    answers that question instead of guessing.
+    """
+    p = pins()
+    s = p["susfs"]
+    cache = ROOT / "tools" / "upstream" / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    patch_path = cache / "susfs_ksu.patch"
+    url = (f"{GITLAB_API}/simonpunk%2Fsusfs4ksu/repository/files/"
+           f"{urllib.parse.quote(s['ksu_patch'], safe='')}/raw?ref={args.susfs_ref or s['branch']}")
+    patch_path.write_bytes(http_bytes(url))
+    strip = "2" if b"+++ b/kernel/" in patch_path.read_bytes() else "1"
+
+    ksu_sha_head = http_json(f"{GITHUB_API}/repos/tiann/KernelSU/commits?per_page=1")[0]["sha"]
+    refs = {"pinned": p["kernelsu"]["ref"], "upstream-head": ksu_sha_head}
+    if args.ksu_ref:
+        refs = {"requested": args.ksu_ref, **refs}
+
+    tmp = Path(tempfile.mkdtemp(prefix="compat-"))
+    run(["git", "clone", "--filter=blob:none", "--no-checkout", "--quiet",
+         "https://github.com/tiann/KernelSU", str(tmp / "src")])
+    src = tmp / "src"
+    print(f"{'kernelsu ref':>16} {'sha':>12}  susfs patch result")
+    bad = 0
+    for label, ref in refs.items():
+        run(["git", "fetch", "--quiet", "origin", ref], cwd=src)
+        sha = run(["git", "rev-parse", "FETCH_HEAD"], cwd=src).stdout.strip()
+        dest = tmp / label.replace("/", "_")
+        export_kernel(src, sha, dest)
+        rc = run(["patch", f"-p{strip}", "--dry-run", "--batch",
+                  "-i", str(patch_path)], cwd=dest, check=False)
+        failed = rc.stdout.count("FAILED")
+        status = "clean" if rc.returncode == 0 else f"{failed} hunk(s) FAILED"
+        bad += rc.returncode != 0
+        print(f"{label:>16} {sha[:12]:>12}  {status}")
+    print()
+    print("verdict:", "pair is compatible" if bad == 0 else
+          "upstream pair NOT aligned - do not sync single features independently")
+    return 0 if bad == 0 else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -356,8 +447,14 @@ def main() -> int:
 
     k = sub.add_parser("sync-kernelsu", help="vendor a new KernelSU snapshot")
     k.add_argument("--ref", help="commit/tag (default: pinned ref)")
+    k.add_argument("--susfs-ref", help="SUSFS ref whose KernelSU patch is applied (default: upstream branch head)")
     k.add_argument("--dry-run", action="store_true")
     k.set_defaults(func=cmd_sync_kernelsu)
+
+    c2 = sub.add_parser("compat", help="check the SUSFS/KernelSU upstream pair")
+    c2.add_argument("--susfs-ref", help="SUSFS ref to test (default: pinned branch)")
+    c2.add_argument("--ksu-ref", help="extra KernelSU ref to test")
+    c2.set_defaults(func=cmd_compat)
 
     s = sub.add_parser("sync-susfs", help="adopt a new SUSFS revision")
     s.add_argument("--ref", help="branch/commit (default: pinned branch)")

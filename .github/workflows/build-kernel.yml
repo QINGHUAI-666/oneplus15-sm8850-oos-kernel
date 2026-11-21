@@ -40,6 +40,13 @@ on:
       jobs:
         description: "bazel --jobs"
         default: "4"
+      kernel_base:
+        description: "kernel source base"
+        type: choice
+        default: fork
+        options:
+          - fork            # this repository's tree (ACK 6.12.117 + oneplus/KSU/SUSFS)
+          - ack-6.12.69     # stock base: AOSP kernel/common @ 5fd39602326e
       runner:
         description: "build machine"
         type: choice
@@ -145,15 +152,44 @@ jobs:
           # shellcheck disable=SC2086
           repo sync -c --no-clone-bundle -j8 $PREBUILTS
 
+      - name: Swap in the stock 6.12.69 ACK base
+        if: ${{ inputs.kernel_base == 'ack-6.12.69' }}
+        run: |
+          set -euo pipefail
+          cd "$SRC/kernel_platform"
+          cert=$(ls common/certs/plk110_*_stock_gki_module_signing.pem)
+          rm -rf common
+          ack=$(mktemp -d)
+          git clone --filter=blob:none --no-checkout --quiet \
+            https://android.googlesource.com/kernel/common "$ack"
+          git -C "$ack" fetch --quiet --depth=1 origin 5fd39602326e
+          git -C "$ack" checkout -q FETCH_HEAD
+          mkdir -p common
+          rsync -a --exclude='.git' "$ack/" common/
+          cp "$cert" "common/$cert"
+          cfg=common/arch/arm64/configs/gki_defconfig
+          if grep -q '^CONFIG_SYSTEM_TRUSTED_KEYS=' "$cfg"; then
+            sed -i "s|^CONFIG_SYSTEM_TRUSTED_KEYS=.*|CONFIG_SYSTEM_TRUSTED_KEYS=\"${cert#common/}\"|" "$cfg"
+          else
+            echo "CONFIG_SYSTEM_TRUSTED_KEYS=\"${cert#common/}\"" >> "$cfg"
+          fi
+          echo "ack base: $(git -C "$ack" rev-parse HEAD)"
+          ls common | head -5
+
       - name: Verify tree is the one under test
         run: |
           set -euo pipefail
           cd "$SRC"
           # our patches must be present, otherwise the manifest tree was used
-          test -d kernel_platform/common/drivers/kernelsu \
-            || { echo "::error::drivers/kernelsu missing - this is not the fork tree"; exit 1; }
-          grep -q "KSU_VERSION" kernel_platform/common/drivers/kernelsu/Kbuild \
-            || { echo "::error::KernelSU pin missing"; exit 1; }
+          if [ "${{ inputs.kernel_base }}" = "ack-6.12.69" ]; then
+            grep -q "KernelSU" kernel_platform/common/drivers/Kconfig \
+              && { echo "::error::ACK base still has KernelSU?"; exit 1; } || true
+          else
+            test -d kernel_platform/common/drivers/kernelsu \
+              || { echo "::error::drivers/kernelsu missing - this is not the fork tree"; exit 1; }
+            grep -q "KSU_VERSION" kernel_platform/common/drivers/kernelsu/Kbuild \
+              || { echo "::error::KernelSU pin missing"; exit 1; }
+          fi
           grep -q "plk110_17_0_1_201_stock_gki_module_signing" \
             kernel_platform/common/arch/arm64/configs/gki_defconfig \
             || { echo "::error::PLK110 trust anchor missing"; exit 1; }

@@ -1,0 +1,17 @@
+{
+  "firmware": "PLK110_17.0.1.201(CN01C20P01)",
+  "ota": "PLK110_11.C.80_1800_202610290542",
+  "post_build_fingerprint": "OnePlus/PLK110/OP60FFL1:17/CP2A.260605.016/B.419631d-1ae3b7b-1aefad6:user/release-keys",
+  "security_patch": "2026-11-01",
+  "post_sdk_level": 37,
+  "stock_kernel_release": "6.12.69-android16-6-g5fd39602326e-ab16372235-4k",
+  "stock_vendor_module_release": "6.12.69-android16-6-o-gd49c9d7602d2-4k",
+  "expected_vermagic_suffix": "SMP preempt mod_unload modversions aarch64",
+  "page_size": 4096,
+  "boot_header_version": 4,
+  "boot_partition_bytes": 100663296,
+  "boot_cmdline": "",
+  "boot_sha256": "a159662617fc02cea1719b2aa2453bc2a3d56689334c20f42efee93956d0e777",
+  "stock_gki_module_signing_cert_sha256_der": "0c388b8140683034bd75c61dde1e0a7499a27c5cc08d4304ece0dd6ecbaf0f4d",
+  "stock_gki_module_signing_cert_fingerprint": "0C:38:8B:81:40:68:30:34:BD:75:C6:1D:DE:1E:0A:74:99:A2:7C:5C:C0:8D:43:04:EC:E0:DD:6E:CB:AF:0F:4D"
+}

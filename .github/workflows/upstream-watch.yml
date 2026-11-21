@@ -66,14 +66,31 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Read sync policy
+        id: policy
+        run: |
+          auto=$(python3 -c "import json;print(str(json.load(open('tools/upstream/pins.json')).get('policy',{}).get('auto_sync', False)).lower())")
+          reason=$(python3 -c "import json;print(json.load(open('tools/upstream/pins.json')).get('policy',{}).get('reason',''))")
+          echo "auto_sync=$auto" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "policy auto_sync=$auto"
+          [ -n "$reason" ] && echo "reason: $reason"
+          {
+            echo "### Sync policy"
+            echo "- auto_sync: \`$auto\`"
+            [ -n "$reason" ] && echo "- $reason"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # pair status is informational and cheap; always report it
+          python3 tools/upstream/upstream.py compat || true
+
       - name: Sync KernelSU
-        if: steps.drift.outputs.drift == 'true' || inputs.force_sync
+        if: (steps.drift.outputs.drift == 'true' || inputs.force_sync) && (steps.policy.outputs.auto_sync == 'true' || inputs.force_sync)
         id: ksu
         continue-on-error: true
         run: python3 tools/upstream/upstream.py sync-kernelsu | tee ksu.log
 
       - name: Sync SUSFS
-        if: steps.drift.outputs.drift == 'true' || inputs.force_sync
+        if: (steps.drift.outputs.drift == 'true' || inputs.force_sync) && (steps.policy.outputs.auto_sync == 'true' || inputs.force_sync)
         id: susfs
         continue-on-error: true
         run: python3 tools/upstream/upstream.py sync-susfs | tee susfs.log
@@ -93,7 +110,7 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Create branch, commit and open PR
-        if: steps.ksu.outcome == 'success' && steps.susfs.outcome == 'success' && (steps.drift.outputs.drift == 'true' || inputs.force_sync)
+        if: steps.ksu.outcome == 'success' && steps.susfs.outcome == 'success' && (steps.drift.outputs.drift == 'true' || inputs.force_sync) && (steps.policy.outputs.auto_sync == 'true' || inputs.force_sync)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -127,7 +144,7 @@ jobs:
             || echo "::warning::PR creation failed (branch still pushed)"
 
       - name: Open issue when the sync needs a human
-        if: steps.ksu.outcome == 'failure' || steps.susfs.outcome == 'failure'
+        if: (steps.ksu.outcome == 'failure' || steps.susfs.outcome == 'failure') && (steps.policy.outputs.auto_sync == 'true' || inputs.force_sync)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

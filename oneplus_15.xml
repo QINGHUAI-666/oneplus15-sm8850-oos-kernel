@@ -42,7 +42,7 @@
     <linkfile dest="kernel_platform/build/prebuilts/clang-tools" src="."/>
   </project>
   <project remote="clo-la" name="kernel_platform/prebuilts/jdk/jdk11" path="kernel_platform/prebuilts/jdk/jdk11" revision="6534511b85c006a29ee80870b4a6ccf87adba128" upstream="refs/heads/ks-kernel.lnx.5.0.r3-rel"/>
-  <project remote="aosp-gki" name="platform/prebuilts/rust" path="kernel_platform/prebuilts/rust" revision="4c613cfb8c5ca9689614fb2110bfd03a2a2f641a" upstream="refs/heads/main-kernel-2025" groups="ddk"/>
+  <project remote="aosp-gki" name="platform/prebuilts/rust" path="kernel_platform/prebuilts/rust" revision="5c78b1e636b2bf68d46a6980437590fddca64147" upstream="refs/heads/main-kernel-2025" groups="ddk"/>
   <project remote="clo-la" name="kernel_platform/system/libufdt" path="kernel_platform/external/libufdt" revision="9b70f594cf149c7c73989c78f03d210f8aa1c1f6" upstream="refs/heads/ks-kernel.lnx.5.0.r3-rel"/>
   <project remote="clo-la" name="kernel_platform/system/tools/mkbootimg" path="kernel_platform/tools/mkbootimg" revision="3884b85673aef00c389ad63548bd5752a7d26bc2" upstream="refs/heads/ks-kernel.lnx.5.0.r3-rel"/>
   <project remote="clo-la" name="kernel_platform/toolchain/prebuilts/ndk/r26" path="kernel_platform/prebuilts/ndk-r26" revision="e535051ebc04204cec44bde38f62385d63180388" upstream="refs/heads/ks-kernel.lnx.5.0.r3-rel" groups="ddk"/>

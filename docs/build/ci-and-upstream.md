@@ -317,3 +317,38 @@ python3 tools/upstream/upstream.py sync-susfs      # 2. 先内核侧（冲突则
 python3 tools/upstream/upstream.py sync-kernelsu --ref <SUSFS 对应的 KSU sha>
 tools/bazel build ... && python3 tools/plk110/verify_image.py Image stock_module_oracle.json
 ```
+
+---
+
+## 8. 当前策略：HOLD（只报告，不自动改）
+
+`tools/upstream/pins.json` 里的 `policy` 字段控制自动化行为：
+
+```json
+"policy": {
+  "auto_sync": false,
+  "reason": "Hold: upstream SUSFS kernel patch conflicts in 5 files ... KernelSU must move together with SUSFS ...",
+  "review_when": "SUSFS head patch applies cleanly to its own prior state, or upstream publishes a tagged release"
+}
+```
+
+| 场景 | `auto_sync: false`（现在） |
+|---|---|
+| 每日定时 `upstream-watch` | 只跑 `check` + `compat`，写 step summary；**不 sync、不建分支、不开 PR、不开 issue** |
+| 手动 `workflow_dispatch`（`force_sync=false`） | 同上 |
+| 手动 `workflow_dispatch` + `force_sync=true` | 强制跑 sync，仍保留“冲突即报错”的保护 |
+
+要解除冻结：把 `policy.auto_sync` 改成 `true` 并推送，或手动带 `force_sync=true` 触发一次。
+
+冻结期间 pins 保持：
+
+```text
+kernelsu  28db74f6f4692e97006ce9ebd8b19b9cc614b5b7  (32716)
+susfs     f83ae68add82d1c564e9428ba81dd537fa721924  (v2.4.0)
+```
+
+`review_when` 的判定命令：
+
+```bash
+python3 tools/upstream/upstream.py compat     # 期望输出 "pair is compatible"
+```

@@ -1,0 +1,58 @@
+name: static-checks
+
+# Runs on every push/PR, on a stock GitHub-hosted runner (no compiler needed).
+# Gate list:
+#   * firmware identity anchors (AVB fingerprint / security patch / os_version)
+#   * GKI module-signing certificate == the one extracted from the stock Image
+#   * stock module oracle still holds 1,069 modules / 4,267 symbols
+#   * KernelSU / SUSFS pins agree with the vendored sources
+#   * all python tooling compiles
+
+on:
+  push:
+    branches: ["main", "plk110-*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Adaptation + pin self-check
+        run: python3 tools/plk110/selfcheck.py --with-openssl
+
+      - name: Compile tooling
+        run: |
+          python3 -m compileall -q tools/plk110 tools/upstream
+          echo "compileall ok"
+
+      - name: Validate workflow YAML
+        run: |
+          python3 - <<'PY'
+          import glob, sys
+          try:
+              import yaml
+          except ImportError:
+              print("pyyaml not available, skipping")
+              sys.exit(0)
+          for f in glob.glob(".github/workflows/*.yml"):
+              yaml.safe_load(open(f))
+              print("ok", f)
+          PY
+
+      - name: Report drift against upstream (informational)
+        continue-on-error: true
+        run: |
+          python3 tools/upstream/upstream.py check || true

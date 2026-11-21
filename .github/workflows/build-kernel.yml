@@ -1,0 +1,164 @@
+name: build-kernel
+
+# Builds the boot image for one variant branch.
+#
+# Why self-hosted: a full build needs ~200 GB of disk (source ~10 GB with the
+# 10 kernel_platform/prebuilts/* projects, bazel output 20-30 GB, kbuild cache
+# up to 20 GB). GitHub-hosted runners have ~14 GB of free SSD, so they cannot
+# run this job. The hosted `static-checks.yml` workflow covers everything that
+# does not need a compiler.
+#
+# Runner requirements:
+#   labels: [self-hosted, linux, x64, op15]
+#   tools : git, repo, python3 >= 3.10, curl
+#   disk  : >= 200 GB free, RAM >= 16 GB (32 GB recommended for --jobs=4)
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "branch to build"
+        type: choice
+        default: plk110-17.0.1.201-kernelsu-susfs
+        options:
+          - plk110-17.0.1.201-base
+          - plk110-17.0.1.201-droidspaces
+          - plk110-17.0.1.201-kernelsu-susfs
+      target:
+        description: "bazel target set"
+        type: choice
+        default: kernel+boot
+        options:
+          - kernel
+          - kernel+boot
+      jobs:
+        description: "bazel --jobs"
+        default: "4"
+  push:
+    branches:
+      - "plk110-*"
+    paths:
+      - "kernel_platform/**"
+      - "tools/plk110/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, op15]
+    timeout-minutes: 240
+    env:
+      VARIANT: ${{ inputs.variant || github.ref_name }}
+      TARGET: ${{ inputs.target || 'kernel+boot' }}
+      JOBS: ${{ inputs.jobs || '4' }}
+      WORK: ${{ github.workspace }}/work
+    steps:
+      - name: Check out tooling (this repo, shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          path: tooling
+
+      - name: Preflight
+        run: |
+          set -euo pipefail
+          echo "variant=$VARIANT target=$TARGET jobs=$JOBS"
+          free -h || true
+          df -h "$RUNNER_WORKSPACE" || true
+          avail=$(df -BG --output=avail "$RUNNER_WORKSPACE" | tail -1 | tr -dc '0-9')
+          if [ "${avail:-0}" -lt 80 ]; then
+            echo "::error::need >= 80 GB free for an incremental build, have ${avail} GB"
+            exit 1
+          fi
+          command -v repo >/dev/null || { echo "::error::repo (git-repo) is not installed"; exit 1; }
+          python3 -c 'import sys; assert sys.version_info >= (3, 10)' \
+            || { echo "::error::python >= 3.10 required"; exit 1; }
+
+      - name: repo init/sync (cached)
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK"
+          cd "$WORK"
+          if [ ! -d .repo ]; then
+            repo init -u "${{ github.server_url }}/${{ github.repository }}" \
+                      -b "$VARIANT" -m oneplus_15.xml --depth=1
+          fi
+          repo sync -c -j8 --no-clone-bundle --force-sync
+
+      - name: Verify tree is complete
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          missing=$(git -C kernel_platform/common rev-parse HEAD >/dev/null 2>&1 && echo no || echo yes)
+          test "$missing" = no || { echo "::error::kernel_platform/common missing"; exit 1; }
+          for p in prebuilts/clang/host/linux-x86 prebuilts/build-tools prebuilts/kernel-build-tools; do
+            test -e "kernel_platform/$p" || { echo "::error::kernel_platform/$p missing (repo sync incomplete)"; exit 1; }
+          done
+          echo "tree OK: $(git -C kernel_platform/common rev-parse --short HEAD)"
+
+      - name: Build kernel
+        run: |
+          set -euo pipefail
+          cd "$WORK/kernel_platform"
+          tools/bazel --output_user_root="$WORK/out/bazel" build \
+            --jobs="$JOBS" --config=local \
+            --cache_dir="$WORK/out/kbuild-cache" \
+            --kbuild_symtypes --show_progress_rate_limit=15 \
+            //common:kernel_aarch64 \
+            //common:kernel_aarch64_abi_dump \
+            //common:kernel_aarch64_abi_kmi_symbol_checks
+
+      - name: Build AVB-signed boot image
+        if: ${{ (inputs.target || 'kernel+boot') == 'kernel+boot' }}
+        run: |
+          set -euo pipefail
+          cd "$WORK/kernel_platform"
+          tools/bazel --output_user_root="$WORK/out/bazel" build \
+            --jobs="$JOBS" --config=local --kbuild_symtypes \
+            //soc-repo:canoe_perf_avb_sign_boot_image
+
+      - name: Collect artifacts
+        id: collect
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cd "$WORK/kernel_platform"
+          image=$(find -L bazel-bin/common -name Image -type f | head -1)
+          symvers=$(find -L bazel-bin/common -name Module.symvers -type f | head -1)
+          test -n "$image" || { echo "::error::Image not produced"; exit 1; }
+          cp "$image" "$GITHUB_WORKSPACE/artifacts/Image"
+          [ -n "$symvers" ] && cp "$symvers" "$GITHUB_WORKSPACE/artifacts/Module.symvers" || true
+          boot=$(find -L bazel-bin/soc-repo -name boot.img -type f 2>/dev/null | head -1 || true)
+          if [ -n "${boot:-}" ]; then
+            cp "$boot" "$GITHUB_WORKSPACE/artifacts/boot.img"
+            sz=$(stat -c%s "$GITHUB_WORKSPACE/artifacts/boot.img")
+            echo "boot.img bytes: $sz"
+            test "$sz" -eq 100663296 || { echo "::error::boot.img must be 100663296 bytes, got $sz"; exit 1; }
+          fi
+          ( cd "$GITHUB_WORKSPACE/artifacts" && sha256sum * | tee SHA256SUMS )
+
+      - name: Contract gate (4,267 symbols of PLK110 17.0.1.201)
+        run: |
+          set -euo pipefail
+          python3 tooling/tools/plk110/verify_image.py \
+            "$GITHUB_WORKSPACE/artifacts/Image" \
+            tooling/tools/plk110/stock_module_oracle.json | tee gate.txt
+          grep -q "VERDICT: PASS" gate.txt || { echo "::error::stock module contract FAILED"; exit 1; }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ env.VARIANT }}-${{ github.run_number }}
+          path: |
+            artifacts/Image
+            artifacts/Module.symvers
+            artifacts/boot.img
+            artifacts/SHA256SUMS
+            gate.txt
+          if-no-files-found: warn
+          retention-days: 14

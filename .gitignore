@@ -8,3 +8,9 @@
 
 # Upstream binary toolchains; retrieve these from the original manifest.
 /kernel_platform/prebuilts/
+
+# Upstream sync scratch
+/tools/upstream/cache/
+/tools/upstream/report.md
+/__pycache__/
+*.pyc

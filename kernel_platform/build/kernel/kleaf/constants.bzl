@@ -21,16 +21,12 @@ load(
     "DEFAULT_IMAGES",
 )
 
-# PLK110 fork: the OnePlus vmlinux_oki artifact is not produced by Android
-# Common source (see kernel_platform.common/BUILD.bazel). Keeping it in the
-# *global* default list makes every rule that iterates DEFAULT_GKI_OUTS demand a
-# file that can never exist, which fails the build in the post-kbuild copy step
-# ("Unable to find vmlinux_oki"). Drop it here so no consumer can ask for it.
 _common_outs = [
     "System.map",
     "modules.builtin",
     "modules.builtin.modinfo",
     "vmlinux",
+    "vmlinux_oki",
     "vmlinux.symvers",
 ]
 

@@ -142,6 +142,18 @@ jobs:
           done
           echo "tree OK: $(git -C kernel_platform/common rev-parse --short HEAD)"
 
+      - name: Show effective kleaf output list
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          echo "synced root commit: $(git rev-parse HEAD)"
+          echo "repo manifest branch: $(git -C .repo/manifests rev-parse --abbrev-ref HEAD 2>/dev/null || echo -)"
+          echo "--- vmlinux_oki references in the synced tree ---"
+          grep -rn 'vmlinux_oki' kernel_platform/build/kernel/kleaf/constants.bzl \
+                kernel_platform/common/BUILD.bazel || echo "none (ok)"
+          echo "--- _common_outs as seen by bazel ---"
+          sed -n '/_common_outs = \[/,/\]/p' kernel_platform/build/kernel/kleaf/constants.bzl
+
       - name: Build kernel
         run: |
           set -euo pipefail
@@ -149,7 +161,7 @@ jobs:
           tools/bazel --output_user_root="$WORK/out/bazel" build \
             --jobs="$JOBS" --config=local \
             --cache_dir="$WORK/out/kbuild-cache" \
-            --kbuild_symtypes --show_progress_rate_limit=15 \
+            --kbuild_symtypes --show_progress_rate_limit=15 --verbose_failures \
             //common:kernel_aarch64 \
             //common:kernel_aarch64_abi_dump \
             //common:kernel_aarch64_abi_kmi_symbol_checks

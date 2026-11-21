@@ -267,7 +267,10 @@ jobs:
           PYEOF
 
           # AVB properties come from avbtool itself (no hand-rolled vbmeta parsing)
-          $AVB info_image --image "$art/boot.img" | tee "$art/avb-info.txt" | grep -E "^Prop:"
+          # info_image indents every line; do not anchor the grep (pipefail would
+          # turn "no match" into a silent early exit) and always dump the file
+          $AVB info_image --image "$art/boot.img" > "$art/avb-info.txt"
+          grep -E "Prop:" "$art/avb-info.txt" || echo "(no Prop lines?)"
           for kv in \
             "com.android.build.boot.os_version:16" \
             "com.android.build.boot.fingerprint:$AVB_FINGERPRINT" \

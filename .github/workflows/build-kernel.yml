@@ -238,14 +238,16 @@ jobs:
             --kernel "$art/Image" \
             --output "$art/boot-unsigned.img"
 
+          # add_hash_footer patches the image in place; --output would emit only
+          # the vbmeta structure (2368 bytes) instead of the padded boot image
+          cp "$art/boot-unsigned.img" "$art/boot.img"
           $AVB add_hash_footer \
-            --image "$art/boot-unsigned.img" \
+            --image "$art/boot.img" \
             --partition_size "$BOOT_PARTITION_SIZE" --partition_name boot \
             --algorithm SHA256_RSA4096 --key "$key" \
             --prop com.android.build.boot.os_version:16 \
             --prop "com.android.build.boot.fingerprint:$AVB_FINGERPRINT" \
-            --prop "com.android.build.boot.security_patch:$AVB_SECURITY_PATCH" \
-            --output "$art/boot.img"
+            --prop "com.android.build.boot.security_patch:$AVB_SECURITY_PATCH"
           rm -f "$art/boot-unsigned.img"
 
           python3 - "$art/boot.img" "$AVB_FINGERPRINT" "$AVB_SECURITY_PATCH" "$BOOT_PARTITION_SIZE" <<'PYEOF'

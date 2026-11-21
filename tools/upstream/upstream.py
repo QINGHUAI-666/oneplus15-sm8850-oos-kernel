@@ -75,6 +75,22 @@ def susfs_head(branch: str) -> tuple[str, str]:
     return c["id"], c["committed_date"]
 
 
+def fetch_susfs_ksu_patch(p: dict):
+    """Download the SUSFS -> KernelSU patch at the pinned SUSFS ref."""
+    s = p["susfs"]
+    cache = ROOT / "tools" / "upstream" / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    out = cache / "susfs_ksu.patch"
+    url = (f"{GITLAB_API}/simonpunk%2Fsusfs4ksu/repository/files/"
+           f"{urllib.parse.quote(s['ksu_patch'], safe='')}/raw?ref={s['ref']}")
+    try:
+        out.write_bytes(http_bytes(url))
+    except Exception as exc:  # noqa: BLE001 - network failures must be visible
+        print(f"[susfs] cannot fetch {s['ksu_patch']}: {exc}", file=sys.stderr)
+        return None
+    return out
+
+
 def cmd_check(args) -> int:
     p = pins()
     drift = False
@@ -104,69 +120,130 @@ KSU_VERSION_RE = re.compile(r"^KSU_VERSION\s*:=\s*(\d+)\s*$", re.M)
 KSU_COMMENT_RE = re.compile(r"^# Vendored upstream ([0-9a-f]{40}) has (\d+)$", re.M)
 
 
+def export_kernel(tmp: Path, ref: str, dest: Path) -> None:
+    """Extract <ref>:kernel from the upstream clone into dest (mirroring)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    tar_path = tmp / f"kernel-{ref[:12]}.tar"
+    with open(tar_path, "wb") as fh:
+        subprocess.run(["git", "archive", "--format=tar", f"{ref}:kernel"],
+                       cwd=tmp, stdout=fh, check=True)
+    with tarfile.open(tar_path) as tar:
+        def _safe(member, target):
+            if member.name.startswith("/") or ".." in member.name.split("/"):
+                raise SystemExit(f"refusing unsafe tar member: {member.name}")
+            return member
+        tar.extractall(dest, filter=_safe)
+
+
+def read_tree(root: Path) -> dict[str, bytes]:
+    out = {}
+    if not root.exists():
+        return out
+    for f in root.rglob("*"):
+        if f.is_file() and not f.is_symlink():
+            out[f.relative_to(root).as_posix()] = f.read_bytes()
+    return out
+
+
+def merge_three_way(base: Path, ours: Path, theirs: Path) -> list[str]:
+    """Apply (theirs - base) onto ours, file by file. Returns conflicted paths."""
+    b, o, t = read_tree(base), read_tree(ours), read_tree(theirs)
+    conflicts = []
+    for rel in sorted(set(b) | set(o) | set(t)):
+        bv, ov, tv = b.get(rel), o.get(rel), t.get(rel)
+        if tv == bv:                      # upstream untouched -> keep local
+            continue
+        target = ours / rel
+        if ov == bv:                      # local untouched -> take upstream
+            if tv is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(tv)
+            continue
+        # both sides changed: 3-way file merge
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "base").write_bytes(bv or b"")
+            (td / "ours").write_bytes(ov or b"")
+            (td / "theirs").write_bytes(tv or b"")
+            res = subprocess.run(["git", "merge-file", "-p",
+                                  str(td / "ours"), str(td / "base"), str(td / "theirs")],
+                                 capture_output=True)
+            if res.returncode != 0:
+                conflicts.append(rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(res.stdout)
+    return conflicts
+
+
 def cmd_sync_kernelsu(args) -> int:
+    """Vendor merge: base = pinned upstream, theirs = new upstream, ours = tree.
+
+    Replacing the directory outright would drop local adaptations (SUSFS hooks,
+    KABI fixes, the pinned version block), so the upstream delta is merged in.
+    """
     p = pins()
-    ref = args.ref or p["kernelsu"]["ref"]
+    old_ref = p["kernelsu"]["ref"]
+    new_ref = args.ref or old_ref
     target = ROOT / p["kernelsu"]["target"]
     if not target.is_dir():
         raise SystemExit(f"target missing: {target}")
 
     tmp = Path(tempfile.mkdtemp(prefix="ksu-"))
-    print(f"[ksu] fetching {ref} into {tmp}")
+    print(f"[ksu] fetching {old_ref[:12]} -> {new_ref[:12]}")
     run(["git", "clone", "--filter=blob:none", "--no-checkout", "--quiet",
-         "https://github.com/tiann/KernelSU", str(tmp)])
-    run(["git", "fetch", "--quiet", "origin", ref], cwd=tmp)
-    sha = run(["git", "rev-parse", "FETCH_HEAD"], cwd=tmp).stdout.strip()
-    count = int(run(["git", "rev-list", "--count", sha], cwd=tmp).stdout.strip())
+         "https://github.com/tiann/KernelSU", str(tmp / "src")])
+    src = tmp / "src"
+    run(["git", "fetch", "--quiet", "origin", old_ref, new_ref], cwd=src)
+    old_sha = run(["git", "rev-parse", f"{old_ref}^{{commit}}"], cwd=src).stdout.strip()
+    new_sha = run(["git", "rev-parse", f"{new_ref}^{{commit}}"], cwd=src).stdout.strip()
+    count = int(run(["git", "rev-list", "--count", new_sha], cwd=src).stdout.strip())
     version = 30000 + count
-    print(f"[ksu] {sha} -> {count} commits -> KSU_VERSION {version}")
+    print(f"[ksu] {old_sha[:12]} -> {new_sha[:12]} ({count} commits, version {version})")
 
     if args.dry_run:
-        print("[ksu] dry-run: not touching the tree")
+        print("[ksu] dry-run: nothing written")
         return 0
 
-    # 1. replace the vendored tree
-    for child in target.iterdir():
-        if child.name in {".git"}:
-            continue
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-    tar_path = tmp / "kernel.tar"
-    with open(tar_path, "wb") as fh:
-        subprocess.run(["git", "archive", "--format=tar", f"{sha}:kernel"],
-                       cwd=tmp, stdout=fh, check=True)
-    with tarfile.open(tar_path) as tar:
-        tar.extractall(target, filter="data")
+    base_src, new_src = tmp / "base", tmp / "new"
+    export_kernel(src, old_sha, base_src)
+    export_kernel(src, new_sha, new_src)
 
-    # 2. pinned version marker (upstream derives it from git, we cannot)
+    conflicts = merge_three_way(base_src, target, new_src)
+    if conflicts:
+        report = ROOT / "tools" / "upstream" / "report.md"
+        report.write_text("# KernelSU vendor merge: conflicts\n\n" +
+                          "\n".join(f"- `{c}`" for c in conflicts) + "\n")
+        print(f"[ksu] {len(conflicts)} conflicted file(s):", file=sys.stderr)
+        for c in conflicts:
+            print(f"  CONFLICT {c}", file=sys.stderr)
+        return 2
+
+    # pinned version marker (upstream derives it from git, we cannot)
     kbuild = ROOT / p["kernelsu"]["version_file"]
     text = kbuild.read_text()
-    text = KSU_COMMENT_RE.sub(
-        f"# Vendored upstream {sha} has {count}", text, count=1)
-    if not KSU_COMMENT_RE.search(text):
-        text = (f"# Vendored upstream {sha} has {count}\n"
-                f"# ancestors including itself. Preserve its real upstream 30000 + count version\n"
-                f"# without depending on a nested .git directory or accessing the network in make.\n"
-                + text)
-    text = KSU_VERSION_RE.sub(f"KSU_VERSION := {version}", text, count=1)
+    marker = (f"# Vendored upstream {new_sha} has {count}\n"
+              f"# ancestors including itself. Preserve its real upstream 30000 + count version\n"
+              f"# without depending on a nested .git directory or accessing the network in make.\n"
+              f"KSU_VERSION := {version}")
+    if re.search(r"^# Vendored upstream", text, re.M):
+        text = re.sub(r"^# Vendored upstream(?:.*\n)*?^KSU_VERSION\s*:=\s*\d+\s*$",
+                      marker, text, count=1, flags=re.M)
+    elif re.search(r"^KSU_VERSION\s*:=\s*\d+\s*$", text, re.M):
+        text = re.sub(r"^KSU_VERSION\s*:=\s*\d+\s*$", marker, text, count=1, flags=re.M)
+    else:
+        text = marker + "\n" + text
     kbuild.write_text(text)
 
-    # 3. re-apply the SUSFS -> KernelSU integration patch
-    ksu_patch = (ROOT / "tools" / "upstream" / "cache" / "susfs_ksu.patch")
-    if ksu_patch.exists():
-        rc = run(["patch", "-p1", "--forward", "--batch", "--no-backup-if-mismatch",
-                  "-i", str(ksu_patch)], cwd=target, check=False)
-        print(rc.stdout[-2000:])
-        if rc.returncode != 0:
-            print("[ksu] SUSFS/KernelSU integration patch did not apply cleanly", file=sys.stderr)
-            return 2
+    if "KSU_SUSFS" not in (target / "Kconfig").read_text():
+        print("[ksu] Kconfig lost the SUSFS options; aborting", file=sys.stderr)
+        return 3
 
-    p["kernelsu"]["ref"] = sha
+    p["kernelsu"]["ref"] = new_sha
     p["kernelsu"]["version"] = version
     save_pins(p)
-    print(f"[ksu] pinned {sha} (version {version})")
+    print(f"[ksu] pinned {new_sha[:12]} (version {version})")
     return 0
 
 

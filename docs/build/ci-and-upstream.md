@@ -188,12 +188,29 @@ python3 tools/upstream/upstream.py sync-susfs    [--ref R] [--dry-run]
 }
 ```
 
-### sync-kernelsu 做什么
+### sync-kernelsu 做什么（三方合并，不是整目录替换）
 
-1. `git clone --filter=blob:none` 上游 → `git archive <ref>:kernel` 覆盖 `drivers/kernelsu/`
-2. `version = 30000 + rev-list --count <ref>`，改写 Kbuild 的注释与 `KSU_VERSION :=`
-3. 重打 SUSFS 的 `10_enable_susfs_for_ksu.patch`（失败即退出 2）
-4. 更新 `pins.json`
+整目录替换会丢掉作者本地适配（SUSFS 钩子、KABI 修正、固定版本块），所以实际做法是**文件级三方合并**：
+
+```
+base   = 上游 <pinned ref> 的 kernel/
+ours   = 树里的 drivers/kernelsu/
+theirs = 上游 <new ref> 的 kernel/
+```
+
+- `theirs == base` → 上游没动，保留本地；
+- `ours == base` → 本地没动，直接取上游；
+- 两边都动 → `git merge-file -p ours base theirs`，返回码非 0 即冲突。
+
+随后写入 `KSU_VERSION := 30000 + rev-list --count <ref>`（上游靠 git 推导，vendored 副本没有 .git），
+校验 `Kconfig` 仍含 `KSU_SUSFS`，最后更新 `pins.json`。
+
+**实测**（在真实仓库上跑）：
+
+| 场景 | 结果 |
+|---|---|
+| 同 ref 重跑（幂等性） | 0 文件变更 ✅ |
+| 升到上游 head `ff70c90d` | 2734 commits → 版本 32734；**2 处真冲突**：`feature/selinux_hide.c`、`selinux/rules.c`（都是 SUSFS 钩子与上游新代码重叠）→ 退出 2 + 写报告 |
 
 ### sync-susfs 做什么
 

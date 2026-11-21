@@ -271,3 +271,49 @@ curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo &&
 | CRC 契约门禁 | `verify_image.py` 只覆盖 MODVERSIONS；struct 布局仍需作者的完整 oracle |
 | 定时任务依赖网络 | GitHub/GitLab API 限流时 `check` 会失败并标红，不误报漂移 |
 | 补丁缓存 | `tools/upstream/cache/` 已被 workflow 删除，且不应提交 |
+
+---
+
+## 7. 上游同步的真实状态（2026-11-21 实测）
+
+```bash
+$ python3 tools/upstream/upstream.py check
+kernelsu   28db74f6f469   ff70c90d6de4   DRIFT
+susfs      f83ae68add82   9b0b13f06967   DRIFT
+```
+
+### 7.1 关键发现：上游是成对的，我们的 pin 是"半旧"的
+
+```bash
+$ python3 tools/upstream/upstream.py compat
+    kernelsu ref          sha  susfs patch result
+          pinned 28db74f6f469  9 hunk(s) FAILED
+   upstream-head ff70c90d6de4  clean
+```
+
+SUSFS 分支 head 的 `10_enable_susfs_for_ksu.patch` **只在 KernelSU head 上干净可打**，
+打在我们 pin 的 KSU 上有 9 个 hunk 失败。
+说明：**上游 SUSFS 已经跟随 KernelSU head 更新，本仓库的 pin 落后了一个"配对"**。
+
+### 7.2 因此不能单独升级任何一个
+
+| 动作 | 现状 | 结论 |
+|---|---|---|
+| `sync-kernelsu --ref <head>` | 机制上能完成（32734、SUSFS Kconfig 保留），但 KSU 侧 SUSFS 已是新版、内核侧 SUSFS 仍是 v2.4.0 | **成对不一致，禁止单独合并** |
+| `sync-susfs` | 内核补丁在 5 个文件冲突（`mm/memory.c`、`fs/readdir.c`、`fs/namei.c`、`security/selinux/hooks.c`、`selinux/ss/services.c`） | **需人工 3-way** |
+
+### 7.3 已实现的自动化边界
+
+- 检测：可靠（GitHub / GitLab API）
+- KernelSU 合并：三方合并 + "SUSFS 补丁拥有的文件整体取上游"（`patch_paths()` 解析补丁文件列表）
+- 冲突处理：写 `tools/upstream/report.md` 并退出 2，**绝不产出半成品**
+- `compat` 子命令：升级前先判断这一对能不能配
+
+### 7.4 升级流程（配对）
+
+```bash
+python3 tools/upstream/upstream.py compat          # 1. 必须 clean
+python3 tools/upstream/upstream.py sync-susfs      # 2. 先内核侧（冲突则人工）
+python3 tools/upstream/upstream.py sync-kernelsu --ref <SUSFS 对应的 KSU sha>
+tools/bazel build ... && python3 tools/plk110/verify_image.py Image stock_module_oracle.json
+```

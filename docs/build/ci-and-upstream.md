@@ -65,8 +65,17 @@ repo sync ──► prebuilts/clang 19.0.1 (14043575) + build-tools + rust + bin
 | kbuild/ccache 缓存 | 10–20 GB | `--cache_dir`（作者增量构建 204 s 就靠它） |
 | **合计** | **≈ 40–60 GB**，建议 ≥ 200 GB 留余量 | |
 
-GitHub 托管 `ubuntu-latest`：4 vCPU / 16 GB RAM / **14 GB 可用 SSD** → **装不下**。
-所以：**构建必须 self-hosted；托管 runner 只跑静态检查。**
+GitHub 托管 `ubuntu-latest`：4 vCPU / 16 GB RAM，官方规格写的是 **14 GB SSD**——但那是**保证配额**，不是实际容量：
+runner 的根卷约 84 GB，初始空闲 29–30 GB，用 free-disk-space 类清理（Android SDK、.NET、GHC、CodeQL、Boost、docker 镜像）
+可再释放 **30–36 GB（激进 ~37–44 GB）**（[规格](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[清理工具说明](https://github.com/ggml-org/free-disk-space)）。
+
+→ 实际可用约 **55–70 GB**，**可以**跑裁剪后的构建（源码 ~14 GB + bazel out ~20 GB），代价是 4 核下 40–70 分钟。
+所以 `build-kernel.yml` 提供两个 runner 选项：
+
+| 选项 | 适用 | 特点 |
+|---|---|---|
+| `self-hosted`（默认，标签 `op15`） | 反复构建 | 保留 prebuilts 与 bazel 缓存，增量 ~3.5 分钟 |
+| `ubuntu-latest` | 临时/无自建机 | 需先清理磁盘（workflow 已内置），首建 40–70 分钟 |
 
 作者实测：首次全量 ~1,436 s（4 线程冷缓存），增量 204 s。
 

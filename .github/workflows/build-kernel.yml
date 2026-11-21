@@ -25,11 +25,11 @@ on:
       variant:
         description: "branch to build"
         type: choice
-        default: plk110-17.0.1.201-kernelsu-susfs
+        default: plk110-17.0.1.201-kernelsu
         options:
-          - plk110-17.0.1.201-base
-          - plk110-17.0.1.201-droidspaces
-          - plk110-17.0.1.201-kernelsu-susfs
+          - plk110-17.0.1.201-full          # KernelSU + SUSFS + Droidspaces
+          - plk110-17.0.1.201-droidspaces   # Droidspaces only (KernelSU off)
+          - plk110-17.0.1.201-kernelsu      # KernelSU + SUSFS only
       target:
         description: "what to build"
         type: choice

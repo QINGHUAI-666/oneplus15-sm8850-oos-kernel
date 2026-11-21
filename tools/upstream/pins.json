@@ -1,0 +1,30 @@
+{
+  "_comment": "Pins of the third-party features vendored into this tree. tools/upstream/upstream.py reads and rewrites this file; workflows report drift against it.",
+  "kernelsu": {
+    "upstream": "tiann/KernelSU",
+    "forge": "github",
+    "ref": "28db74f6f4692e97006ce9ebd8b19b9cc614b5b7",
+    "version": 32716,
+    "version_formula": "30000 + git rev-list --count <ref>",
+    "source_subdir": "kernel",
+    "target": "kernel_platform/common/drivers/kernelsu",
+    "version_file": "kernel_platform/common/drivers/kernelsu/Kbuild"
+  },
+  "susfs": {
+    "upstream": "simonpunk/susfs4ksu",
+    "forge": "gitlab",
+    "branch": "gki-android16-6.12",
+    "ref": "f83ae68add82d1c564e9428ba81dd537fa721924",
+    "version": "v2.4.0",
+    "kernel_patch": "kernel_patches/50_add_susfs_in_gki-android16-6.12.patch",
+    "ksu_patch": "kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch",
+    "owned_files": [
+      "kernel_patches/fs/susfs.c->fs/susfs.c",
+      "kernel_patches/include/linux/susfs.h->include/linux/susfs.h",
+      "kernel_patches/include/linux/susfs_def.h->include/linux/susfs_def.h"
+    ],
+    "kernel_root": "kernel_platform/common",
+    "ksu_root": "kernel_platform/common/drivers/kernelsu",
+    "version_file": "kernel_platform/common/include/linux/susfs.h"
+  }
+}
